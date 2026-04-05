@@ -1,0 +1,92 @@
+##################################################################
+# 폐쇄망 배포용 docker-compose (빌드 없이 저장된 이미지 사용)
+#
+# 사용법:
+#   1. docker load < images.tar.gz
+#   2. cp .env.example .env && vi .env
+#   3. docker compose -f docker-compose.prod.yml up -d
+#   4. http://localhost:3000 접속 → 로그인 (admin/admin1234)
+#
+# 구조:
+#   Browser → nginx(:3000) → app(:8081) [Spring Security 세션 인증]
+#                                ↓
+#                          postgres(:5432)
+##################################################################
+
+services:
+  # PostgreSQL + pgvector
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aia-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aia}
+      POSTGRES_USER: ${POSTGRES_USER:-aia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aia1234}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aia}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - prod-network
+
+  # Spring Boot 앱 (사전 빌드된 이미지 사용)
+  app:
+    image: dify_java_client_with_streaming-app
+    container_name: aia-test-client
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - SPRING_PROFILES_ACTIVE=default
+      - DIFY_API_URL=${DIFY_API_URL}
+      - DIFY_API_KEY=${DIFY_API_KEY}
+      - DIFY_EVAL_URL=${DIFY_EVAL_URL:-}
+      - DIFY_EVAL_KEY=${DIFY_EVAL_KEY:-}
+      - AZURE_SEARCH_ENDPOINT=${AZURE_SEARCH_ENDPOINT}
+      - AZURE_SEARCH_API_KEY=${AZURE_SEARCH_API_KEY}
+      - AZURE_SEARCH_INDEX=${AZURE_SEARCH_INDEX}
+      - AZURE_SEARCH_EMBEDDING_URL=${AZURE_SEARCH_EMBEDDING_URL:-}
+      - AZURE_SEARCH_EMBEDDING_MODEL=${AZURE_SEARCH_EMBEDDING_MODEL:-}
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-aia}
+      - SPRING_DATASOURCE_USERNAME=${POSTGRES_USER:-aia}
+      - SPRING_DATASOURCE_PASSWORD=${POSTGRES_PASSWORD:-aia1234}
+    volumes:
+      - ${CERT_DIR:-/genai/upload}:/app/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - prod-network
+
+  # nginx (리버스 프록시 + 정적 파일 서빙)
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    volumes:
+      - ./nginx/prod.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      - prod-network
+
+volumes:
+  postgres-data:
+
+networks:
+  prod-network:
+    driver: bridge
